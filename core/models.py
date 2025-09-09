@@ -1,7 +1,9 @@
 from django.db import models
+from django.contrib.auth.models import User
 import random
 
 class Customer(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='customer')
     first_name = models.CharField(max_length=100)
     last_name = models.CharField(max_length=100)
     created_at = models.DateTimeField(auto_now_add=True)
