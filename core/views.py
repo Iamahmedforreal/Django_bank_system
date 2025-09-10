@@ -11,6 +11,8 @@ from .serializers import (
     WithdrawalSerializer, TransferSerializer, SecureIBANTransferSerializer
 )
 from .logging_utils import bank_logger, get_client_ip, log_api_request
+from .utils import generate_random_otp, send_sms_otp, verify_otp
+from django.utils import timezone
 
 
 class IsOwnerOrStaff(permissions.BasePermission):
@@ -365,3 +367,127 @@ def secure_iban_transfer_view(request):
         'error': 'Validation failed',
         'details': serializer.errors
     }, status=status.HTTP_400_BAD_REQUEST)
+
+
+# 2FA Views
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def enable_2fa_view(request):
+    """Enable 2FA for authenticated user."""
+    try:
+        customer = request.user.customer
+        phone_number = request.data.get('phone_number')
+        
+        if not phone_number:
+            return Response(
+                {'error': 'Phone number is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Update customer with phone number and enable 2FA
+        customer.phone_number = phone_number
+        customer.two_factor_enabled = True
+        customer.save()
+        
+        return Response({
+            'message': '2FA enabled successfully',
+            'phone_number': phone_number[-4:] + '****'
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response(
+            {'error': 'Failed to enable 2FA'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def send_otp_view(request):
+    """Send OTP to user's registered phone number."""
+    try:
+        customer = request.user.customer
+        
+        if not customer.two_factor_enabled:
+            return Response(
+                {'error': '2FA is not enabled for this account'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if not customer.phone_number:
+            return Response(
+                {'error': 'No phone number registered'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Generate new OTP
+        otp = generate_random_otp()
+        
+        # Save OTP to customer
+        customer.two_factor_otp = otp
+        customer.otp_created_at = timezone.now()
+        customer.save()
+        
+        # Send OTP via SMS
+        message_sid = send_sms_otp(customer.phone_number, otp)
+        
+        if message_sid:
+            return Response({
+                'message': 'OTP sent successfully',
+                'phone_number': customer.phone_number[-4:] + '****'
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response(
+                {'error': 'Failed to send OTP'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    except Exception as e:
+        return Response(
+            {'error': 'Failed to send OTP'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def verify_otp_view(request):
+    """Verify OTP provided by user."""
+    try:
+        customer = request.user.customer
+        provided_otp = request.data.get('otp')
+        
+        if not provided_otp:
+            return Response(
+                {'error': 'OTP is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if not customer.two_factor_enabled:
+            return Response(
+                {'error': '2FA is not enabled for this account'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Verify OTP
+        if verify_otp(customer, provided_otp):
+            # Clear OTP after successful verification
+            customer.two_factor_otp = ''
+            customer.otp_created_at = None
+            customer.save()
+            
+            return Response({
+                'message': 'OTP verified successfully',
+                'verified': True
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response(
+                {'error': 'Invalid or expired OTP'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    except Exception as e:
+        return Response(
+            {'error': 'OTP verification failed'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )

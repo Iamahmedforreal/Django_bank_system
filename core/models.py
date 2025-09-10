@@ -4,6 +4,11 @@ import random
 
 class Customer(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='customer')
+    phone_number = models.CharField(max_length=15, blank=True)
+    two_factor_enabled = models.BooleanField(default=False)
+    two_factor_otp = models.CharField(max_length=6, blank=True)
+    otp_created_at = models.DateTimeField(null=True, blank=True)
+    
     first_name = models.CharField(max_length=100)
     last_name = models.CharField(max_length=100)
     created_at = models.DateTimeField(auto_now_add=True)
