@@ -14,6 +14,7 @@ class Customer(models.Model):
     
 class Account(models.Model):
     account_number = models.CharField(max_length=20, unique=True)
+    iban = models.CharField(max_length=34, unique=True, null=True, blank=True)  # International Bank Account Number
     customer = models.ForeignKey(Customer, on_delete=models.CASCADE)
     ACCOUNT_TYPE = [('savings', 'Savings')
                     , ('checking', 'Checking')]
@@ -25,6 +26,14 @@ class Account(models.Model):
     def save (self, *args, **kwargs):
         if not self.account_number:
             self.account_number = str(random.randint(1000000000, 9999999999))
+        
+        # Auto-generate IBAN if not provided (simplified format for demo)
+        if not self.iban:
+            # Format: US + 2 check digits + 4 bank code + 10 account number
+            bank_code = "BANK"
+            check_digits = str(random.randint(10, 99))
+            self.iban = f"US{check_digits}{bank_code}{self.account_number}"
+        
         super().save(*args, **kwargs)
         
 
@@ -38,10 +47,10 @@ class Transaction(models.Model):
         ('transfer', 'Transfer'),
     ]
 
-
     account = models.ForeignKey(Account, on_delete=models.CASCADE , related_name='transactions') 
     transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)
     amount = models.DecimalField(max_digits=10, decimal_places=2)
+    description = models.CharField(max_length=255, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
 

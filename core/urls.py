@@ -20,6 +20,7 @@ urlpatterns = [
     path('banking/deposit/', views.deposit_view, name='deposit'),
     path('banking/withdraw/', views.withdrawal_view, name='withdraw'),
     path('banking/transfer/', views.transfer_view, name='transfer'),
+    path('banking/secure-transfer/', views.secure_iban_transfer_view, name='secure_iban_transfer'),
     
     # Include router URLs
     path('', include(router.urls)),

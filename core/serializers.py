@@ -8,10 +8,10 @@ from .models import Customer, Account, Transaction
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
     """Serializer for user registration"""
-    password = serializers.CharField(write_only=True, min_length=8)
+    password = serializers.CharField(write_only=True , min_length=8)
     password_confirm = serializers.CharField(write_only=True)
-    first_name = serializers.CharField(max_length=100)
-    last_name = serializers.CharField(max_length=100)
+    first_name = serializers.CharField(write_only=True , required=True , max_length=100)
+    last_name = serializers.CharField(write_only=True , required=True , max_length=100)
 
     class Meta:
         model = User
@@ -19,23 +19,27 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         if attrs['password'] != attrs['password_confirm']:
-            raise serializers.ValidationError("Passwords don't match")
+            raise serializers.ValidationError("Passwords do not match")
         return attrs
-
+        
+    """saves user and customer savely using transaction"""
     def create(self, validated_data):
         validated_data.pop('password_confirm')
         first_name = validated_data.pop('first_name')
         last_name = validated_data.pop('last_name')
-        
+
         with transaction.atomic():
             user = User.objects.create_user(**validated_data)
             Customer.objects.create(
                 user=user,
                 first_name=first_name,
                 last_name=last_name
+
             )
         return user
 
+
+    
 
 class UserLoginSerializer(serializers.Serializer):
     """Serializer for user login"""
@@ -75,11 +79,12 @@ class AccountSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = Account
-        fields = ('id', 'account_number', 'customer', 'customer_name', 'account_type', 'balance', 'created_at')
-        read_only_fields = ('id', 'account_number', 'balance', 'created_at')
+        fields = ('id', 'account_number', 'iban', 'customer', 'customer_name', 'account_type', 'balance', 'created_at')
+        read_only_fields = ('id', 'account_number', 'iban', 'balance', 'created_at' , 'customer')
 
     def create(self, validated_data):
         # Set the customer to the authenticated user's customer
+        
         request = self.context.get('request')
         if request and request.user:
             validated_data['customer'] = request.user.customer
@@ -222,6 +227,98 @@ class TransferSerializer(serializers.Serializer):
                 account=to_account,
                 transaction_type='transfer',
                 amount=amount
+            )
+        
+        return withdrawal_transaction
+
+
+class SecureIBANTransferSerializer(serializers.Serializer):
+    """
+    Secure serializer for IBAN-based money transfers with enhanced authentication
+    """
+    recipient_iban = serializers.CharField(max_length=34, min_length=15)
+    amount = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal('0.01'))
+    source_account_id = serializers.IntegerField()
+    description = serializers.CharField(max_length=255, required=False, default="Money transfer")
+    
+    def validate_recipient_iban(self, value):
+        """Validate recipient IBAN exists"""
+        try:
+            recipient_account = Account.objects.get(iban=value)
+            self.recipient_account = recipient_account
+            return value
+        except Account.DoesNotExist:
+            raise serializers.ValidationError("Recipient IBAN not found")
+    
+    def validate_source_account_id(self, value):
+        """Validate source account exists and belongs to authenticated user"""
+        try:
+            source_account = Account.objects.get(id=value)
+            self.source_account = source_account
+            return value
+        except Account.DoesNotExist:
+            raise serializers.ValidationError("Source account does not exist")
+    
+    def validate(self, attrs):
+        """Additional validation for the transfer"""
+        amount = attrs['amount']
+        
+        # Check if accounts are different
+        if hasattr(self, 'source_account') and hasattr(self, 'recipient_account'):
+            if self.source_account.iban == self.recipient_account.iban:
+                raise serializers.ValidationError("Cannot transfer to the same account")
+        
+        # Check sufficient balance
+        if hasattr(self, 'source_account') and self.source_account.balance < amount:
+            raise serializers.ValidationError("Insufficient balance in source account")
+        
+        # Add daily transfer limit check (example: $10,000 per day)
+        from django.utils import timezone
+        from django.db.models import Sum
+        
+        today = timezone.now().date()
+        daily_transfers = Transaction.objects.filter(
+            account=self.source_account,
+            transaction_type='transfer',
+            created_at__date=today
+        ).aggregate(total=Sum('amount'))['total'] or Decimal('0')
+        
+        daily_limit = Decimal('10000.00')  # $10,000 daily limit
+        if daily_transfers + amount > daily_limit:
+            raise serializers.ValidationError(
+                f"Daily transfer limit of ${daily_limit} exceeded. "
+                f"Already transferred: ${daily_transfers}"
+            )
+        
+        return attrs
+    
+    def create(self, validated_data):
+        """Execute the secure transfer"""
+        source_account = self.source_account
+        recipient_account = self.recipient_account
+        amount = validated_data['amount']
+        description = validated_data.get('description', 'Money transfer')
+        
+        with transaction.atomic():
+            # Update balances
+            source_account.balance -= amount
+            recipient_account.balance += amount
+            source_account.save()
+            recipient_account.save()
+            
+            # Create transaction records with description
+            withdrawal_transaction = Transaction.objects.create(
+                account=source_account,
+                transaction_type='transfer',
+                amount=amount,
+                description=f"Transfer to {recipient_account.iban}: {description}"
+            )
+            
+            Transaction.objects.create(
+                account=recipient_account,
+                transaction_type='transfer',
+                amount=amount,
+                description=f"Transfer from {source_account.iban}: {description}"
             )
         
         return withdrawal_transaction

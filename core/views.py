@@ -8,7 +8,7 @@ from .models import Customer, Account, Transaction
 from .serializers import (
     UserRegistrationSerializer, UserLoginSerializer, CustomerSerializer,
     AccountSerializer, TransactionSerializer, DepositSerializer,
-    WithdrawalSerializer, TransferSerializer
+    WithdrawalSerializer, TransferSerializer, SecureIBANTransferSerializer
 )
 
 
@@ -211,3 +211,83 @@ def transfer_view(request):
         transaction_serializer = TransactionSerializer(transaction_obj)
         return Response(transaction_serializer.data, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def secure_iban_transfer_view(request):
+    """
+    Secure IBAN-based money transfer with enhanced authentication.
+    Only authenticated users can send money from their own accounts.
+    
+    Required fields:
+    - recipient_iban: Target account IBAN
+    - amount: Transfer amount
+    - source_account_id: Source account ID (must belong to authenticated user)
+    - description: Optional transfer description
+    """
+    serializer = SecureIBANTransferSerializer(data=request.data)
+    
+    if serializer.is_valid():
+        # Additional security check: Ensure user owns the source account
+        source_account = serializer.source_account
+        
+        # Check if user owns the source account or is staff
+        if not request.user.is_staff and source_account.customer.user != request.user:
+            return Response(
+                {
+                    'error': 'Access denied',
+                    'detail': 'You can only transfer from your own accounts'
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Log the transfer attempt for security monitoring
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(
+            f"Transfer attempt - User: {request.user.username}, "
+            f"Source Account: {source_account.account_number}, "
+            f"Target IBAN: {serializer.validated_data['recipient_iban']}, "
+            f"Amount: {serializer.validated_data['amount']}"
+        )
+        
+        try:
+            # Execute the transfer
+            transaction_obj = serializer.save()
+            
+            # Return success response with transaction details
+            return Response({
+                'success': True,
+                'message': 'Transfer completed successfully',
+                'transaction': {
+                    'id': transaction_obj.id,
+                    'amount': str(transaction_obj.amount),
+                    'source_account': source_account.account_number,
+                    'source_iban': source_account.iban,
+                    'recipient_iban': serializer.validated_data['recipient_iban'],
+                    'description': transaction_obj.description,
+                    'created_at': transaction_obj.created_at,
+                    'status': 'completed'
+                }
+            }, status=status.HTTP_201_CREATED)
+            
+        except Exception as e:
+            # Log the error for security monitoring
+            logger.error(
+                f"Transfer failed - User: {request.user.username}, "
+                f"Error: {str(e)}"
+            )
+            
+            return Response(
+                {
+                    'error': 'Transfer failed',
+                    'detail': 'An error occurred while processing the transfer'
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    return Response({
+        'error': 'Validation failed',
+        'details': serializer.errors
+    }, status=status.HTTP_400_BAD_REQUEST)
