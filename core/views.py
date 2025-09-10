@@ -10,6 +10,7 @@ from .serializers import (
     AccountSerializer, TransactionSerializer, DepositSerializer,
     WithdrawalSerializer, TransferSerializer, SecureIBANTransferSerializer
 )
+from .logging_utils import bank_logger, get_client_ip, log_api_request
 
 
 class IsOwnerOrStaff(permissions.BasePermission):
@@ -48,22 +49,67 @@ def register_view(request):
     """
     Register a new user and create associated customer.
     """
+    log_api_request(request, '/api/auth/register/')
+    
     serializer = UserRegistrationSerializer(data=request.data)
     if serializer.is_valid():
-        user = serializer.save()
-        refresh = RefreshToken.for_user(user)
-        return Response({
-            'message': 'User created successfully',
-            'refresh': str(refresh),
-            'access': str(refresh.access_token),
-            'user': {
-                'id': user.id,
-                'username': user.username,
-                'email': user.email,
-                'first_name': user.customer.first_name,
-                'last_name': user.customer.last_name,
-            }
-        }, status=status.HTTP_201_CREATED)
+        try:
+            user = serializer.save()
+            
+            # Log successful registration
+            bank_logger.log_security_event(
+                'USER_REGISTRATION',
+                user,
+                {
+                    'ip_address': get_client_ip(request),
+                    'user_agent': request.META.get('HTTP_USER_AGENT', ''),
+                    'email': user.email
+                }
+            )
+            
+            refresh = RefreshToken.for_user(user)
+            return Response({
+                'message': 'User created successfully',
+                'refresh': str(refresh),
+                'access': str(refresh.access_token),
+                'user': {
+                    'id': user.id,
+                    'username': user.username,
+                    'email': user.email,
+                    'first_name': user.customer.first_name,
+                    'last_name': user.customer.last_name,
+                }
+            }, status=status.HTTP_201_CREATED)
+            
+        except Exception as e:
+            # Log registration failure
+            bank_logger.log_security_event(
+                'REGISTRATION_FAILURE',
+                None,
+                {
+                    'ip_address': get_client_ip(request),
+                    'error': str(e),
+                    'attempted_username': request.data.get('username', 'unknown')
+                },
+                severity='ERROR'
+            )
+            return Response({
+                'error': 'Registration failed',
+                'detail': 'An error occurred during registration'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    # Log validation errors
+    bank_logger.log_security_event(
+        'REGISTRATION_VALIDATION_ERROR',
+        None,
+        {
+            'ip_address': get_client_ip(request),
+            'errors': serializer.errors,
+            'attempted_username': request.data.get('username', 'unknown')
+        },
+        severity='WARNING'
+    )
+    
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -73,9 +119,23 @@ def login_view(request):
     """
     Login user and return JWT tokens.
     """
+    log_api_request(request, '/api/auth/login/')
+    
+    username = request.data.get('username', 'unknown')
+    ip_address = get_client_ip(request)
+    
     serializer = UserLoginSerializer(data=request.data)
     if serializer.is_valid():
         user = serializer.validated_data['user']
+        
+        # Log successful login
+        bank_logger.log_authentication_attempt(
+            username, 
+            success=True, 
+            ip_address=ip_address,
+            details={'user_id': user.id}
+        )
+        
         refresh = RefreshToken.for_user(user)
         return Response({
             'message': 'Login successful',
@@ -89,6 +149,15 @@ def login_view(request):
                 'last_name': user.customer.last_name,
             }
         }, status=status.HTTP_200_OK)
+    
+    # Log failed login attempt
+    bank_logger.log_authentication_attempt(
+        username,
+        success=False,
+        ip_address=ip_address,
+        details={'errors': serializer.errors}
+    )
+    
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -243,13 +312,14 @@ def secure_iban_transfer_view(request):
             )
         
         # Log the transfer attempt for security monitoring
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.info(
-            f"Transfer attempt - User: {request.user.username}, "
-            f"Source Account: {source_account.account_number}, "
-            f"Target IBAN: {serializer.validated_data['recipient_iban']}, "
-            f"Amount: {serializer.validated_data['amount']}"
+        log_api_request(request, '/api/banking/secure-transfer/', request.user)
+        
+        bank_logger.log_transfer_attempt(
+            request.user,
+            source_account.id,
+            serializer.validated_data['recipient_iban'],
+            str(serializer.validated_data['amount']),
+            success=True  # Will be updated if it fails
         )
         
         try:
@@ -274,9 +344,13 @@ def secure_iban_transfer_view(request):
             
         except Exception as e:
             # Log the error for security monitoring
-            logger.error(
-                f"Transfer failed - User: {request.user.username}, "
-                f"Error: {str(e)}"
+            bank_logger.log_transfer_attempt(
+                request.user,
+                source_account.id,
+                serializer.validated_data['recipient_iban'],
+                str(serializer.validated_data['amount']),
+                success=False,
+                error_message=str(e)
             )
             
             return Response(
